@@ -876,14 +876,20 @@ func (srv *Server) initialReadLimitSize() int64 {
 type expectContinueReader struct {
 	resp       *response
 	readCloser io.ReadCloser
-	closed     bool
-	sawEOF     bool
+
+	mu     sync.Mutex
+	closed bool
+	sawEOF bool
 }
 
 func (ecr *expectContinueReader) Read(p []byte) (n int, err error) {
+	ecr.mu.Lock()
+	defer ecr.mu.Unlock()
+
 	if ecr.closed {
 		return 0, ErrBodyReadAfterClose
 	}
+
 	if !ecr.resp.wroteContinue && !ecr.resp.conn.hijacked() {
 		ecr.resp.wroteContinue = true
 		ecr.resp.conn.bufw.WriteString("HTTP/1.1 100 Continue\r\n\r\n")
@@ -897,6 +903,9 @@ func (ecr *expectContinueReader) Read(p []byte) (n int, err error) {
 }
 
 func (ecr *expectContinueReader) Close() error {
+	ecr.mu.Lock()
+	defer ecr.mu.Unlock()
+
 	ecr.closed = true
 	return ecr.readCloser.Close()
 }
@@ -1289,8 +1298,12 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	// because we don't know if the next bytes on the wire will be
 	// the body-following-the-timer or the subsequent request.
 	// See Issue 11549.
-	if ecr, ok := w.req.Body.(*expectContinueReader); ok && !ecr.sawEOF {
-		w.closeAfterReply = true
+	if ecr, ok := w.req.Body.(*expectContinueReader); ok {
+		ecr.mu.Lock()
+		if !ecr.sawEOF {
+			w.closeAfterReply = true
+		}
+		ecr.mu.Unlock()
 	}
 
 	// Per RFC 2616, we should consume the request body before
